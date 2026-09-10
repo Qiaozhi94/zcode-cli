@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename } from "node:path";
 
@@ -12,6 +12,7 @@ import {
   readSetupPending,
   readUserConfig,
   updateUserConfig,
+  userConfigPath,
   userConfigPathHint
 } from "../../../src/model-access.ts";
 import {
@@ -78,6 +79,12 @@ import {
 } from "./events.ts";
 import { buildExitSummary } from "./exit-summary.ts";
 import { FooterBar } from "./footer-bar.ts";
+import { PlanQuotaPoller, planQuotaEndpoint, type PlanQuotaSnapshot, type PlanQuotaTarget } from "./plan-quota.ts";
+import {
+  UsageStatusLine,
+  usagePollInterval,
+  usageStatusText
+} from "./usage-status.ts";
 import {
   ContextDetailView,
   StatusDetailView,
@@ -600,6 +607,7 @@ class ZCodeTui {
   private readonly runtimeActivity: RuntimeActivityView;
   private readonly status: StatusLine;
   private readonly turnStatus: FooterBar;
+  private readonly usageStatus: UsageStatusLine;
   private readonly queuedInputView: QueuedInputView;
   private readonly attachmentBar: AttachmentBar;
   private editor: Editor;
@@ -686,6 +694,9 @@ class ZCodeTui {
   private sessionMetrics: SessionMetrics = {};
   private usageRefreshInFlight = false;
   private usageRefreshPending = false;
+  private usagePollTimer?: ReturnType<typeof setTimeout>;
+  private planQuota?: PlanQuotaSnapshot;
+  private planQuotaPoller?: PlanQuotaPoller;
   private runtimeProjection?: RuntimeProjectionSnapshot;
   private todos: RuntimeTodo[] = [];
   private todoGroups: RuntimeTodoGroup[] = [];
@@ -739,6 +750,14 @@ class ZCodeTui {
     });
     this.status = new StatusLine();
     this.turnStatus = new FooterBar();
+    this.usageStatus = new UsageStatusLine();
+    this.planQuotaPoller = new PlanQuotaPoller({
+      resolve: () => this.planQuotaTarget(),
+      onResult: (snapshot) => {
+        this.planQuota = snapshot;
+        this.updateUsageStatus();
+      }
+    });
     this.queuedInputView = new QueuedInputView(this.theme);
     this.inputQueue = new InputQueue({
       onStateChanged: (state) => {
@@ -877,6 +896,8 @@ class ZCodeTui {
         }
       }
       this.scheduleRuntimePoll(0);
+      this.scheduleUsagePoll(0);
+      this.planQuotaPoller?.start(0);
       void this.loadHistory();
       if (this.options.subscribeSessionEvents) {
         this.unsubscribeSession = this.options.subscribeSessionEvents((event) => {
@@ -1033,6 +1054,7 @@ class ZCodeTui {
     this.composerHost.addChild(this.attachmentBar);
     this.composerHost.addChild(this.editorHost);
     this.composerHost.addChild(this.status);
+    this.composerHost.addChild(this.usageStatus);
 
     this.mountLayout();
   }
@@ -2660,6 +2682,7 @@ class ZCodeTui {
     );
     this.turnTimer.unref?.();
     this.rescheduleRuntimePoll();
+    this.scheduleUsagePoll();
     this.updateTurnStatus();
   }
 
@@ -5215,24 +5238,28 @@ class ZCodeTui {
   }
 
   private updateMetadata(): void {
+    // Field order follows the customized layout: mode, model, thought depth,
+    // context remaining, session tokens; situational fields trail behind.
+    // Priority controls narrow-terminal dropping (lowest drops first), so it
+    // mirrors the display order in reverse.
     const fields: StatusLineField[] = [
+      {
+        text: this.theme.muted(`◉ ${this.mode}`),
+        compactText: this.theme.muted(`◉ ${this.mode}`),
+        priority: 87
+      },
       {
         text: this.theme.muted(`◈ ${this.model}`),
         compactText: this.theme.muted(`◈ ${this.model}`),
         priority: 100,
         required: true
-      },
-      {
-        text: this.theme.muted(`◉ ${this.mode}`),
-        compactText: this.theme.muted(`◉ ${this.mode}`),
-        priority: 70
       }
     ];
     if (this.thoughtLevel) {
       fields.push({
         text: this.theme.muted(`⚡ ${this.thoughtLevel}`),
         compactText: this.theme.muted(`⚡ ${this.thoughtLevel}`),
-        priority: 60
+        priority: 86
       });
     }
 
@@ -5246,13 +5273,31 @@ class ZCodeTui {
       fields.push({
         text: style(`ctx ${remaining}% left`),
         compactText: style(`ctx ${remaining}%`),
-        priority: 90
+        priority: 85
+      });
+    }
+    const metrics = this.sessionMetrics;
+    if (metrics.totalTokens !== undefined && metrics.totalTokens > 0) {
+      const cached = (metrics.cacheCreationTokens ?? 0) + (metrics.cacheReadTokens ?? 0);
+      const breakdown: string[] = [];
+      if (metrics.inputTokens !== undefined) {
+        breakdown.push(`in ${formatTokens(Math.max(0, metrics.inputTokens - cached))}`);
+      }
+      if (metrics.outputTokens !== undefined) {
+        breakdown.push(`out ${formatTokens(metrics.outputTokens)}`);
+      }
+      if (cached > 0) breakdown.push(`cache ${formatTokens(cached)}`);
+      const text = `tokens ${formatTokens(metrics.totalTokens)}${breakdown.length > 0 ? ` (${breakdown.join(" ")})` : ""}`;
+      fields.push({
+        text: this.theme.muted(text),
+        compactText: this.theme.muted(`${formatTokens(metrics.totalTokens)} tok`),
+        priority: 60
       });
     }
     const runtimeCache = this.runtimeProjection?.contextUsage?.cache;
     const runtimeCacheRate = runtimeCache?.latestHitRate ?? runtimeCache?.hitRate;
-    const sessionInputTokens = this.sessionMetrics.inputTokens;
-    const sessionCacheReadTokens = this.sessionMetrics.cacheReadTokens;
+    const sessionInputTokens = metrics.inputTokens;
+    const sessionCacheReadTokens = metrics.cacheReadTokens;
     const sessionCacheRate = sessionInputTokens !== undefined && sessionInputTokens > 0 && sessionCacheReadTokens !== undefined
       ? sessionCacheReadTokens / sessionInputTokens
       : undefined;
@@ -5270,15 +5315,7 @@ class ZCodeTui {
       fields.push({
         text: style(`cache ${cacheRate}% hit`),
         compactText: style(`cache ${cacheRate}%`),
-        priority: 85
-      });
-    }
-    if (this.sessionMetrics.totalTokens !== undefined) {
-      const tokens = formatTokens(this.sessionMetrics.totalTokens);
-      fields.push({
-        text: this.theme.muted(`session ${tokens} tokens`),
-        compactText: this.theme.muted(`session ${tokens}`),
-        priority: 20
+        priority: 55
       });
     }
     const backgroundCount = this.runtimeProjection?.backgroundJobs.filter(isActiveBackgroundJob).length ?? 0;
@@ -5314,6 +5351,7 @@ class ZCodeTui {
     }
 
     this.status.setFields(fields, this.theme.muted(" ─ "));
+    this.updateUsageStatus(false);
     this.ui.requestRender();
   }
 
@@ -5448,6 +5486,7 @@ class ZCodeTui {
       },
       Boolean(this.options.readSessionUsage)
     );
+    this.updateUsageStatus();
     this.updateRuntimeActivity(false);
   }
 
@@ -5601,6 +5640,54 @@ class ZCodeTui {
     this.sessionMetrics = mergeMetrics(this.sessionMetrics, usageMetrics(usage));
   }
 
+  // Keeps the usage line (and live token counts) fresh while turns stream:
+  // the runtime records usage per completed model request, so polling the
+  // authoritative session usage mid-turn tracks consumption in real time.
+  private scheduleUsagePoll(delay?: number): void {
+    if (this.stopped || !this.options.readSessionUsage) return;
+    if (this.usagePollTimer) clearTimeout(this.usagePollTimer);
+    const active = this.turnStartedAt !== undefined
+      || this.activeSubmissions > 0
+      || runtimeActivityActive(this.runtimeProjection);
+    this.usagePollTimer = setTimeout(() => {
+      this.usagePollTimer = undefined;
+      void this.refreshSessionUsage().finally(() => this.scheduleUsagePoll());
+    }, delay ?? usagePollInterval(active));
+    this.usagePollTimer.unref?.();
+  }
+
+  private updateUsageStatus(requestRender = true): void {
+    const text = usageStatusText(this.planQuota);
+    this.usageStatus.setContent(
+      text === undefined ? undefined : this.theme.muted(text.full),
+      text === undefined ? undefined : this.theme.muted(text.compact)
+    );
+    if (requestRender) this.ui.requestRender();
+  }
+
+  // Resolves the coding-plan quota endpoint for the active provider. Returns
+  // undefined when the model is not on a known plan host or no API key is
+  // configured — the poller then skips until the model changes.
+  private planQuotaTarget(): PlanQuotaTarget | undefined {
+    const providerId = this.model.split("/", 1)[0];
+    if (providerId !== "zai" && providerId !== "bigmodel") return undefined;
+    let config: unknown;
+    try {
+      config = JSON.parse(readFileSync(userConfigPath(), "utf8"));
+    } catch {
+      return undefined;
+    }
+    if (!isRecord(config) || !isRecord(config.provider)) return undefined;
+    const provider = config.provider[providerId];
+    if (!isRecord(provider) || !isRecord(provider.options)) return undefined;
+    const baseURL = asString(provider.options.baseURL);
+    const apiKey = asString(provider.options.apiKey)?.trim();
+    if (!baseURL || !apiKey) return undefined;
+    const endpoint = planQuotaEndpoint(baseURL);
+    if (!endpoint) return undefined;
+    return { provider: providerId, endpoint, apiKey };
+  }
+
   private async refreshExitUsage(): Promise<void> {
     const readSessionUsage = this.options.readSessionUsage;
     if (!readSessionUsage) return;
@@ -5696,6 +5783,8 @@ class ZCodeTui {
     if (this.fullscreenWelcomeTransitionTimer) clearTimeout(this.fullscreenWelcomeTransitionTimer);
     if (this.runtimeRefreshTimer) clearTimeout(this.runtimeRefreshTimer);
     if (this.runtimePollTimer) clearTimeout(this.runtimePollTimer);
+    if (this.usagePollTimer) clearTimeout(this.usagePollTimer);
+    this.planQuotaPoller?.stop();
     this.unsubscribeSession?.();
     this.unsubscribeWorkflow?.();
     const elapsedMilliseconds = this.turnStartedAt === undefined

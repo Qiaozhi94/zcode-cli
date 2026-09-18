@@ -15,11 +15,16 @@ import { fileURLToPath } from "node:url";
 
 import {
   clearSetupPending,
-  ensureUserConfig,
+  ensureCliSettings,
+  readCliSettings,
+  hasConfiguredProviderAccess,
+  providerConfigPath,
   markSetupPending,
   readConfiguredModelAccess,
   readSetupPending
 } from "./model-access.ts";
+import { sharedDataBaseDir } from "./config-paths.ts";
+import { providerMigrationNeeded } from "./runtime-config-bridge.ts";
 import {
   classifyZaiOAuthInvocation,
   runZaiOAuthLogin,
@@ -44,30 +49,7 @@ const defaultBrowserUseArgument = "--browser-use=headless";
 const tuiRuntimeLogLimitBytes = 2 * 1024 * 1024;
 const versionArguments = new Set(["version", "--version", "-v"]);
 const runtimeVariadicOptions = new Set(["--disallowedTools", "--disallowed-tools"]);
-const fallbackRuntimeOptionTypes: Readonly<Record<string, RuntimeCliOptionType>> = {
-  attach: "string",
-  "browser-executable": "string",
-  "browser-use": "string",
-  continue: "boolean",
-  cwd: "string",
-  force: "boolean",
-  "force-mcs": "boolean",
-  help: "boolean",
-  json: "boolean",
-  locale: "string",
-  mode: "string",
-  "no-browser": "boolean",
-  "no-color": "boolean",
-  "output-format": "string",
-  prompt: "string",
-  resume: "string",
-  stdio: "boolean",
-  surface: "string",
-  target: "string",
-  "target-replace": "boolean",
-  verbose: "boolean",
-  version: "boolean"
-};
+
 
 export function resolveModelRetryMaxRetries(env: NodeJS.ProcessEnv): string {
   return env.ZCODE_MODEL_RETRY_MAX_RETRIES?.trim() || defaultModelRetryMaxRetries;
@@ -101,12 +83,12 @@ export function readRuntimeCliOptionTypes(
   try {
     const metadata: unknown = JSON.parse(readFileSync(metadataPath, "utf8"));
     const capabilities = capabilitiesFromExtractionMetadata(metadata);
-    if (!capabilities) return fallbackRuntimeOptionTypes;
+    if (!capabilities) throw new Error("Invalid capability manifest");
     return Object.fromEntries(
       Object.entries(capabilities.cli.globalOptions).map(([name, option]) => [name, option.type])
     );
   } catch {
-    return fallbackRuntimeOptionTypes;
+    throw new Error("Runtime capability metadata is missing or invalid; sync the current runtime before launching.");
   }
 }
 
@@ -299,6 +281,7 @@ export function firstRunSetupEnv(setupPending: boolean, args: string[]): NodeJS.
 function runtimeEnvironment(extra: NodeJS.ProcessEnv = {}): Record<string, string> {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.ZCODE_CLI_OAUTH_CALLBACK_STDIN;
+  delete env.ZCODE_CLI_MIGRATE_CONFIG;
   const distributionVersion = readDistributionVersion();
   const inherited: NodeJS.ProcessEnv = {
     ...env,
@@ -306,6 +289,7 @@ function runtimeEnvironment(extra: NodeJS.ProcessEnv = {}): Record<string, strin
   };
   const merged: NodeJS.ProcessEnv = {
     ...inherited,
+    ZCODE_DATA_BASE_DIR: sharedDataBaseDir(inherited),
     ZCODE_BASE_URL: resolveZCodeBaseUrl(inherited),
     ZCODE_MODEL_RETRY_MAX_RETRIES: resolveModelRetryMaxRetries(inherited),
     ZCODE_APP_CLI_EXECUTABLE: process.execPath,
@@ -321,6 +305,15 @@ function signalExitCode(signal: NodeJS.Signals | null): number {
   if (!signal) return 1;
   const number = (osConstants.signals as Record<string, number>)[signal];
   return typeof number === "number" ? 128 + number : 1;
+}
+
+function abortSignalName(signal: AbortSignal): NodeJS.Signals | undefined {
+  const reason = signal.reason;
+  return reason === "SIGINT" || reason === "SIGTERM" || reason === "SIGHUP" ? reason : undefined;
+}
+
+function abortSignalExitCode(signal: AbortSignal): number {
+  return signalExitCode(abortSignalName(signal) ?? "SIGINT");
 }
 
 async function waitForChild(
@@ -440,13 +433,13 @@ async function completeOfficialZaiLogin(
   runtimeArgs: string[],
   abortSignal: AbortSignal
 ): Promise<number> {
-  if (abortSignal.aborted) return 130;
+  if (abortSignal.aborted) return abortSignalExitCode(abortSignal);
   const child = spawnChild(node, [runtimePath, ...runtimeArgs], {
     cwd: process.cwd(),
     env: runtimeEnvironment({ ZCODE_CLI_OAUTH_CALLBACK_STDIN: "1" }),
     stdio: ["pipe", "inherit", "inherit"]
   });
-  const onAbort = () => child.kill("SIGINT");
+  const onAbort = () => child.kill(abortSignalName(abortSignal) ?? "SIGINT");
   abortSignal.addEventListener("abort", onAbort, { once: true });
   try {
     child.stdin?.end(JSON.stringify(payload));
@@ -477,8 +470,10 @@ export async function main(args: string[]): Promise<number> {
 
   let setupPending = false;
   try {
-    const bootstrap = await ensureUserConfig();
-    if (bootstrap.created) {
+    const bootstrap = await ensureCliSettings();
+    await readCliSettings();
+    sharedDataBaseDir();
+    if (bootstrap.created && !bootstrap.migrated) {
       await markSetupPending();
       setupPending = true;
     } else {
@@ -490,10 +485,31 @@ export async function main(args: string[]): Promise<number> {
   }
 
   const node = resolveNodeExecutable();
+  if (providerMigrationNeeded()) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawnChild(node, [runtimePath, "--version"], {
+          env: runtimeEnvironment({ ZCODE_CLI_MIGRATE_CONFIG: "1" }),
+          stdio: ["ignore", "ignore", "pipe"]
+        });
+        let error = "";
+        child.stderr?.on("data", chunk => { error = `${error}${chunk}`.slice(-4096); });
+        child.once("error", reject);
+        child.once("close", code => code === 0 ? resolve() : reject(new Error(error.trim() || "Provider migration failed.")));
+      });
+    } catch (error) {
+      console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      return 1;
+    }
+  }
   const pluginAbortController = new AbortController();
-  const cancelPluginCommand = () => pluginAbortController.abort();
-  process.once("SIGINT", cancelPluginCommand);
-  process.once("SIGTERM", cancelPluginCommand);
+  const cancelPluginCommand = (signal: NodeJS.Signals) => () => pluginAbortController.abort(signal);
+  const onPluginSigint = cancelPluginCommand("SIGINT");
+  const onPluginSigterm = cancelPluginCommand("SIGTERM");
+  const onPluginSighup = cancelPluginCommand("SIGHUP");
+  process.once("SIGINT", onPluginSigint);
+  process.once("SIGTERM", onPluginSigterm);
+  if (process.platform !== "win32") process.once("SIGHUP", onPluginSighup);
   let pluginCommand: number | undefined;
   try {
     pluginCommand = await runPluginCommand(args, {
@@ -511,8 +527,9 @@ export async function main(args: string[]): Promise<number> {
       signal: pluginAbortController.signal
     });
   } finally {
-    process.off("SIGINT", cancelPluginCommand);
-    process.off("SIGTERM", cancelPluginCommand);
+    process.off("SIGINT", onPluginSigint);
+    process.off("SIGTERM", onPluginSigterm);
+    if (process.platform !== "win32") process.off("SIGHUP", onPluginSighup);
   }
   if (pluginCommand !== undefined) return pluginCommand;
 
@@ -520,10 +537,10 @@ export async function main(args: string[]): Promise<number> {
   const zaiOAuth = classifyZaiOAuthInvocation(args);
   if (login.checkConfiguredAccess) {
     const access = await readConfiguredModelAccess();
-    if (access) {
+    if (access || await hasConfiguredProviderAccess()) {
       console.log(
-        `Model access is already configured for ${access.model}; OAuth login is not required.\n`
-        + `Config: ${access.configPath}\n`
+        `Model access is already configured${access ? ` for ${access.model}` : ""}; OAuth login is not required.\n`
+        + `Config: ${access?.configPath ?? providerConfigPath()}\n`
         + "Run `zcode login --oauth` to force Z.AI OAuth."
       );
       return 0;
@@ -532,9 +549,13 @@ export async function main(args: string[]): Promise<number> {
 
   if (zaiOAuth) {
     const abortController = new AbortController();
-    const cancel = () => abortController.abort(new Error("Login cancelled."));
-    process.once("SIGINT", cancel);
-    process.once("SIGTERM", cancel);
+    const cancel = (signal: NodeJS.Signals) => () => abortController.abort(signal);
+    const onSigint = cancel("SIGINT");
+    const onSigterm = cancel("SIGTERM");
+    const onSighup = cancel("SIGHUP");
+    process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
+    if (process.platform !== "win32") process.once("SIGHUP", onSighup);
     try {
       const code = await runZaiOAuthLogin({
         abortSignal: abortController.signal,
@@ -553,15 +574,16 @@ export async function main(args: string[]): Promise<number> {
       return code;
     } catch (error) {
       console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-      return abortController.signal.aborted ? 130 : 1;
+      return abortController.signal.aborted ? abortSignalExitCode(abortController.signal) : 1;
     } finally {
-      process.off("SIGINT", cancel);
-      process.off("SIGTERM", cancel);
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      if (process.platform !== "win32") process.off("SIGHUP", onSighup);
     }
   }
 
   try {
-    const diagnostic = await promptPreflight(login.args);
+    const diagnostic = await readConfiguredModelAccess() ? undefined : await promptPreflight(login.args);
     if (diagnostic) {
       console.error(diagnostic);
       return 1;

@@ -1,0 +1,157 @@
+{
+  "appVersion": "3.11.2",
+  "cliVersion": "0.16.5",
+  "extractedAt": "2026-09-18T15:52:06.717Z",
+  "sha512": "4UAMZSP9ZWBrnb8wGaP39rb5dB5ikPx4aYPXKXGea1Vmd6L6vGma3rXwRxKbhBxgsCIE9jv6tmrdSL60RrzGcA==",
+  "source": "https://cdn-zcode.z.ai/zcode/electron/releases/3.11.2/linux-x64/ZCode-3.11.2-linux-x64.deb",
+  "runtimeCapabilities": {
+    "schemaVersion": 1,
+    "cli": {
+      "globalOptions": {
+        "help": {
+          "type": "boolean"
+        },
+        "json": {
+          "type": "boolean"
+        },
+        "output-format": {
+          "type": "string"
+        },
+        "no-color": {
+          "type": "boolean"
+        },
+        "no-browser": {
+          "type": "boolean"
+        },
+        "browser-use": {
+          "type": "string"
+        },
+        "browser-executable": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "attach": {
+          "type": "string",
+          "multiple": true
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "locale": {
+          "type": "string"
+        },
+        "resume": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "target-replace": {
+          "type": "boolean"
+        },
+        "continue": {
+          "type": "boolean"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "force-mcs": {
+          "type": "boolean"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "verbose": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "boolean"
+        },
+        "stdio": {
+          "type": "boolean"
+        },
+        "surface": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "runtimePatches": [
+    {
+      "id": "official-mcp-availability",
+      "requirement": "optional",
+      "status": "applied"
+    },
+    {
+      "id": "tui-bridge",
+      "requirement": "required",
+      "status": "applied"
+    },
+    {
+      "id": "model-catalog-reload",
+      "requirement": "required",
+      "status": "applied"
+    },
+    {
+      "id": "goal-failure-pause",
+      "requirement": "optional",
+      "status": "applied"
+    },
+    {
+      "id": "terminal-tool-projection",
+      "requirement": "optional",
+      "status": "applied"
+    },
+    {
+      "id": "detached-agent-lifecycle",
+      "requirement": "optional",
+      "status": "applied"
+    },
+    {
+      "id": "agent-auto-background",
+      "requirement": "optional",
+      "status": "applied"
+    },
+    {
+      "id": "http-no-content",
+      "requirement": "required",
+      "status": "applied"
+    },
+    {
+      "id": "network-retry-classification",
+      "requirement": "required",
+      "status": "applied"
+    },
+    {
+      "id": "stream-eof-finish-guard",
+      "requirement": "required",
+      "status": "applied"
+    },
+    {
+      "id": "oauth-http-errors",
+      "requirement": "optional",
+      "status": "applied"
+    },
+    {
+      "id": "desktop-oauth",
+      "requirement": "required",
+      "status": "applied"
+    },
+    {
+      "id": "login-model-defaults",
+      "requirement": "required",
+      "status": "applied"
+    },
+    {
+      "id": "cli-help-contract",
+      "requirement": "required",
+      "status": "applied"
+    }
+  ],
+  "tui": {
+    "implementation": "@zcode/tui",
+    "foundation": "@earendil-works/pi-tui"
+  }
+}

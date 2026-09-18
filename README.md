@@ -273,6 +273,7 @@ picker to return to input selection, then `Esc` again to close rewind.
 /diff                         browse current and per-turn file changes
 /context                      inspect context usage and source composition
 /status                       inspect detailed runtime and session status
+/rename <title>               rename the current session
 /activity                     inspect every active tool and open task
 /tasks                        inspect and manage background tasks
 /tasks message <id> <text>    send guidance to a running background agent

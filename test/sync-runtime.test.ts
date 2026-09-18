@@ -1382,6 +1382,91 @@ describe("runtime synchronization", () => {
     expect(patchRuntimeTuiBridge(patched)).toBe(patched);
   });
 
+  test("persists and reads custom session titles through runtime and legacy bridges", async () => {
+    const runtime = [
+      "function R(e,t){return f(e,{rewindCreatedMessageId:t.revert?.createdMessageID,rewindKeptMessageIds:t.revert?.keptMessageIDs,rewindTargetMessageId:t.revert?.targetMessageID})}",
+      "async function L(e){if(!e.sessionStore)return[];let t=await e.sessionStore.messages({sessionID:e.sessionId});return p(t)}",
+      'function p(e){let t=[];for(let r of e){if(r.info.role==="user"){let l=r.text;t.push({content:l,role:"user"});continue}let n=[],s=[],u=r.text;t.push({content:u,...s.length>0?{parts:s}:{},role:"agent"})}return t}',
+      "function c(e,t){if(t.targetMessageId)return O(e,[t.targetMessageId]);let r=P(e,t.targetCheckpointId);return r?[r]:[]}",
+      'loadSessionTranscript:a(async()=>await dUr({sessionId:e.sessionId,sessionStore:e.sessionStore}),"loadSessionTranscript"),readTodos:',
+      "E.sendInput=async(A,$)=>{let c=t.runtime.getActiveTurnInfo();if(c)return t.runtime.steerTurn({commandKind:$?.commandKind,inputId:$?.inputId,queryId:$?.queryId,expectedTurnId:$?.expectedTurnId,input:A});return Kvt(await S(),D,O1(t))},",
+      'listSkills:k(()=>H(e),"listSkills"),',
+      "E.recallPreviousInput=async A=>await(await S()).recallPreviousInputHistory?.(A)??null,",
+      "CVr(E,S,r);",
+      "return c({recallPreviousInput:g.recallPreviousInput,sendInput:g.sendInput,submitPrompt:g})"
+    ].join("");
+    const patched = patchRuntimeTuiBridge(runtime);
+    const setterStart = patched.indexOf("E.setCustomSessionTitle=async");
+    const readerStart = patched.indexOf("E.readCustomSessionTitle=async");
+    const end = patched.indexOf(",E.", readerStart);
+    expect(setterStart).toBeGreaterThan(-1);
+    expect(readerStart).toBeGreaterThan(setterStart);
+    expect(end).toBeGreaterThan(readerStart);
+
+    const sessions = new Map([
+      ["first", { title: "Original prompt", titleSource: "first_input" }],
+      ["second", { title: "Generated title", titleSource: "generated" }]
+    ]);
+    const store = { getSession: async (id: string) => sessions.get(id) };
+    const calls: unknown[] = [];
+    const core = {
+      sessionStore: store,
+      rootTraceContext: { traceId: "root" },
+      async setCustomSessionTitle(options: { title: string; traceContext?: unknown }) {
+        expect(this).toBe(core);
+        calls.push(options);
+        sessions.set(String(app.sessionId), { title: options.title, titleSource: "custom" });
+      }
+    };
+    let app: Record<string, unknown> = { sessionId: "first", runtime: core };
+    const bridge = new Function("S", `const E={};${patched.slice(setterStart, end)};return E;`)(
+      async () => app
+    ) as {
+      setCustomSessionTitle: (options: { title: string; traceContext?: unknown }) => Promise<unknown>;
+      readCustomSessionTitle: () => Promise<unknown>;
+    };
+    expect(await bridge.readCustomSessionTitle()).toBeUndefined();
+    await bridge.setCustomSessionTitle({ title: "Chosen title" });
+    expect(await bridge.readCustomSessionTitle()).toBe("Chosen title");
+    expect(calls).toEqual([{ title: "Chosen title", traceContext: core.rootTraceContext }]);
+
+    app.sessionId = "second";
+    expect(await bridge.readCustomSessionTitle()).toBeUndefined();
+    const explicitTrace = { traceId: "explicit" };
+    await bridge.setCustomSessionTitle({ title: "Second title", traceContext: explicitTrace });
+    expect(calls.at(-1)).toEqual({ title: "Second title", traceContext: explicitTrace });
+    expect(await bridge.readCustomSessionTitle()).toBe("Second title");
+    app.sessionId = "first";
+    expect(await bridge.readCustomSessionTitle()).toBe("Chosen title");
+
+    app = {
+      sessionId: "first",
+      sessionStore: store,
+      async setCustomSessionTitle(options: { title: string }) {
+        expect(this).toBe(app);
+        sessions.set(String(this.sessionId), { title: options.title, titleSource: "custom" });
+      }
+    };
+    await bridge.setCustomSessionTitle({ title: "Legacy alias" });
+    expect(await bridge.readCustomSessionTitle()).toBe("Legacy alias");
+    app = { sessionId: "missing" };
+    expect(await bridge.readCustomSessionTitle()).toBeUndefined();
+    await expect(bridge.setCustomSessionTitle({ title: "Unavailable" })).rejects.toThrow(/unavailable in this runtime/u);
+    app = { runtime: { setCustomSessionTitle: async () => { throw new Error("Store unavailable"); } } };
+    await expect(bridge.setCustomSessionTitle({ title: "Failed" })).rejects.toThrow("Store unavailable");
+
+    expect(patched).toContain("setCustomSessionTitle:g.setCustomSessionTitle");
+    expect(patched).toContain("readCustomSessionTitle:g.readCustomSessionTitle");
+    expect(patchRuntimeTuiBridge(patched)).toBe(patched);
+    const missingReader = patched
+      .replace(`${patched.slice(readerStart, end)},`, "")
+      .replace("readCustomSessionTitle:g.readCustomSessionTitle,", "");
+    const upgraded = patchRuntimeTuiBridge(missingReader);
+    expect(upgraded).toContain("readCustomSessionTitle:g.readCustomSessionTitle");
+    expect(upgraded.match(/\.readCustomSessionTitle=async/gu)).toHaveLength(1);
+    expect(patchRuntimeTuiBridge(upgraded)).toBe(upgraded);
+  });
+
   test("auto-backgrounds long Agent calls while preserving explicit configuration", () => {
     const runtime = "function delay(){return{autoBackgroundMs:this.config.subagents?.autoBackgroundMs,outputRootDir:'tasks'}}";
     const patched = patchRuntimeAgentAutoBackground(runtime);

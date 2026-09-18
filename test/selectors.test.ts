@@ -7,7 +7,8 @@ import {
   isModePickerRequest,
   isModelPickerRequest,
   modePicker,
-  modelPicker
+  modelPicker,
+  sessionRenameRequest
 } from "../packages/zcode-tui/src/selectors.ts";
 
 describe("TUI selectors", () => {
@@ -117,4 +118,28 @@ describe("TUI selectors", () => {
     expect(isModePickerRequest("/mode plan")).toBe(false);
   });
 
+});
+
+describe("sessionRenameRequest", () => {
+  test("parses explicit rename titles", () => {
+    expect(sessionRenameRequest("/rename Sidebar drag fix")).toBe("Sidebar drag fix");
+    expect(sessionRenameRequest("  /rename   spaced   out  ")).toBe("spaced out");
+  });
+
+  test("returns an empty title for the bare usage form", () => {
+    expect(sessionRenameRequest("/rename")).toBe("");
+    expect(sessionRenameRequest("/rename ")).toBe("");
+    expect(sessionRenameRequest("/rename \x1b]0;INJECTED\x07")).toBe("");
+  });
+
+  test("removes terminal controls before persisting a title", () => {
+    expect(sessionRenameRequest("/rename safe\x07\x1b]0;INJECTED\x07")).toBe("safe");
+    expect(sessionRenameRequest("/rename safe\u009c\u009d0;INJECTED\u009c")).toBe("safe");
+    expect(sessionRenameRequest("/rename 修复\x1b[31m登录\x1b[0m  ✓")).toBe("修复登录 ✓");
+  });
+
+  test("ignores other commands and conversation text", () => {
+    expect(sessionRenameRequest("/model zai/glm-5.2")).toBeUndefined();
+    expect(sessionRenameRequest("what does /rename do")).toBeUndefined();
+  });
 });

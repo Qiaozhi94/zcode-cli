@@ -150,6 +150,7 @@ import {
   isModelPickerRequest,
   modePicker,
   modelPicker,
+  sessionRenameRequest,
   type PickerSpec
 } from "./selectors.ts";
 import { RichMarkdown } from "./rich-markdown.ts";
@@ -183,6 +184,7 @@ import {
 } from "./selection-command.ts";
 import {
   emitSessionTerminalTitle,
+  normalizeSessionTitle,
   SESSION_TITLE_SPINNER_FRAME_DURATION_MS,
   sessionTitleFromFirstMessage,
   sessionTitleSpinnerFrame
@@ -1354,6 +1356,7 @@ class ZCodeTui {
       { name: "diff", description: "Browse current and per-turn file changes" },
       { name: "context", description: "Inspect context usage and prompt composition" },
       { name: "status", description: "Inspect detailed runtime and session status" },
+      { name: "rename", description: "Rename the current session", argumentHint: "<title>" },
       { name: "config", description: "Configure ZCode TUI settings" },
       { name: "settings", description: "Configure ZCode TUI settings" },
       { name: "search", description: "Search the retained transcript", argumentHint: "<text>|next|prev|clear" },
@@ -1628,6 +1631,11 @@ class ZCodeTui {
     }
     if (input === "/status") {
       await this.showStatusDetails();
+      return;
+    }
+    const renameRequest = sessionRenameRequest(input);
+    if (renameRequest !== undefined) {
+      await this.handleSessionRename(renameRequest);
       return;
     }
     if (input === "/config" || input === "/settings") {
@@ -2127,6 +2135,7 @@ class ZCodeTui {
       this.emittedSessionTerminalTitle = "";
       emitSessionTerminalTitle(this.options.stdout ?? process.stdout, "");
       this.sessionMetrics = {};
+      await this.restoreCustomSessionTitle();
       this.restoreTranscript(restoredMessages(result.restoredMessages));
       if (this.transcript.blockCount > 0) this.enterSessionRail(true);
     }
@@ -4664,6 +4673,40 @@ class ZCodeTui {
     });
   }
 
+  /**
+   * `/rename <title>`: persists a user-owned session title through the
+   * runtime's setCustomSessionTitle capability, so the runtime's own title
+   * generator will not replace it later. Older runtimes without the bridge
+   * keep the previous title and say so.
+   */
+  private async handleSessionRename(title: string): Promise<void> {
+    if (!this.options.setCustomSessionTitle) {
+      this.addNotice("Session renaming is unavailable in this runtime.", "warning");
+      return;
+    }
+    if (!this.sessionId) {
+      this.addNotice("No active session to rename yet.", "warning");
+      return;
+    }
+    if (!title) {
+      this.addNotice("Usage: /rename <new title>", "muted");
+      return;
+    }
+    try {
+      await this.options.setCustomSessionTitle({ title });
+    } catch (error) {
+      this.addNotice(
+        `Rename failed: ${error instanceof Error ? error.message : String(error)}`,
+        "error"
+      );
+      return;
+    }
+    this.sessionTerminalTitle = title;
+    this.sessionTitleEmitted = true;
+    this.refreshSessionTerminalTitle();
+    this.addNotice(`Session renamed to: ${title}`, "muted");
+  }
+
   private async readMcpSummary(): Promise<string | undefined> {
     if (!this.options.listMcpServers) return undefined;
     try {
@@ -5094,7 +5137,21 @@ class ZCodeTui {
     }
   }
 
+  private async restoreCustomSessionTitle(): Promise<void> {
+    try {
+      const persistedTitle = await this.options.readCustomSessionTitle?.();
+      const title = typeof persistedTitle === "string" ? normalizeSessionTitle(persistedTitle) : "";
+      if (!title) return;
+      this.sessionTerminalTitle = title;
+      this.sessionTitleEmitted = true;
+      this.refreshSessionTerminalTitle();
+    } catch {
+      // Older runtimes and unavailable metadata fall back to the first message.
+    }
+  }
+
   private async restoreInitialTranscript(): Promise<void> {
+    await this.restoreCustomSessionTitle();
     if (this.options.loadSessionTranscript) {
       try {
         this.restoreTranscript(restoredMessages(await this.options.loadSessionTranscript()));

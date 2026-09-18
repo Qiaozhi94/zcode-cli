@@ -176,6 +176,21 @@ export class TerminalSession implements AsyncDisposable {
     throw this.waitError(label, pattern, "history");
   }
 
+  async waitForTitle(label: string, title: string, timeoutMilliseconds = defaultWaitMilliseconds): Promise<void> {
+    const deadline = Date.now() + timeoutMilliseconds;
+    while (Date.now() < deadline) {
+      await this.#screen.settled();
+      this.throwScreenError();
+      if (this.#screen.title() === title) {
+        this.journal.record("assert.title.match", { label, title });
+        return;
+      }
+      if (this.#child.exitCode !== null) break;
+      await Bun.sleep(20);
+    }
+    throw new Error(`Timed out waiting for ${label}: expected title ${JSON.stringify(title)}, got ${JSON.stringify(this.#screen.title())}.\n${this.journal.format()}`);
+  }
+
   private waitError(label: string, pattern: RegExp, target: "history" | "screen"): Error {
     return new Error([
       `Timed out waiting for ${label} in terminal ${target} (${String(pattern)}).`,

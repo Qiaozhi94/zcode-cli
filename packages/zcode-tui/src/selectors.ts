@@ -1,3 +1,4 @@
+import { normalizeSessionTitle } from "./session-title.ts";
 import { asString, isRecord } from "./types.ts";
 
 export interface PickerItem {
@@ -59,6 +60,16 @@ export function explicitModelRequest(input: string): string | undefined {
 
 export function isEffortPickerRequest(input: string): boolean {
   return pickerRequest(input, new Set(["effort", "variant"]));
+}
+
+/**
+ * Parse a `/rename <title>` request into the normalized title. Returns `""`
+ * for an empty title and undefined for any other command or conversation text.
+ */
+export function sessionRenameRequest(input: string): string | undefined {
+  const match = /^\/rename(?:\s+([\s\S]+))?$/iu.exec(input.trim());
+  if (!match) return undefined;
+  return normalizeSessionTitle(match[1] ?? "");
 }
 
 function extractModelId(record: Record<string, unknown> | undefined, raw: unknown): string | undefined {

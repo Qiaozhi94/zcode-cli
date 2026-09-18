@@ -552,6 +552,8 @@ export function patchRuntimeTuiBridge(runtime: string): string {
     && runtime.includes(".cancelBackgroundTask=async")
     && runtime.includes(".previewFileRewind=async e=>")
     && runtime.includes(".applyFileRewind=async e=>")
+    && runtime.includes(".setCustomSessionTitle=async e=>")
+    && runtime.includes(".readCustomSessionTitle=async()=>")
     && runtime.includes(interruptTurnMarker)
     && runtime.includes(interruptWaitForIdleMarker)
     && runtime.includes(".promoteQueuedInput=async(")
@@ -569,6 +571,8 @@ export function patchRuntimeTuiBridge(runtime: string): string {
     && /cancelBackgroundTask:[A-Za-z_$][\w$]*\.cancelBackgroundTask/u.test(runtime)
     && /previewFileRewind:[A-Za-z_$][\w$]*\.previewFileRewind/u.test(runtime)
     && /applyFileRewind:[A-Za-z_$][\w$]*\.applyFileRewind/u.test(runtime)
+    && /setCustomSessionTitle:[A-Za-z_$][\w$]*\.setCustomSessionTitle/u.test(runtime)
+    && /readCustomSessionTitle:[A-Za-z_$][\w$]*\.readCustomSessionTitle/u.test(runtime)
     && /interruptTurn:[A-Za-z_$][\w$]*\.interruptTurn/u.test(runtime)
     && /promoteQueuedInput:[A-Za-z_$][\w$]*\.promoteQueuedInput/u.test(runtime)
     && /readSessionUsage:[A-Za-z_$][\w$]*\.readSessionUsage/u.test(runtime)
@@ -778,6 +782,12 @@ export function patchRuntimeTuiBridge(runtime: string): string {
   if (!patched.includes(".applyFileRewind=async e=>")) {
     assignments.push(`${bridge}.applyFileRewind=async e=>{let t=await ${getApp}();return await t.runtime?.applyWorkspaceFileRewind?.({targetMessageIds:e})??null}`);
   }
+  if (!patched.includes(".setCustomSessionTitle=async e=>")) {
+    assignments.push(`${bridge}.setCustomSessionTitle=async e=>{let t=await ${getApp}();let r=t.runtime?.setCustomSessionTitle?.bind(t.runtime)??t.setCustomSessionTitle?.bind(t);if(!r)throw new Error("Session renaming is unavailable in this runtime.");return await r({title:e.title,traceContext:e.traceContext??t.runtime?.rootTraceContext})}`);
+  }
+  if (!patched.includes(".readCustomSessionTitle=async()=>")) {
+    assignments.push(`${bridge}.readCustomSessionTitle=async()=>{let t=await ${getApp}(),o=t.sessionStore??t.runtime?.sessionStore,r=await o?.getSession?.(t.sessionId);return r?.titleSource==="custom"&&typeof r.title==="string"?r.title:void 0}`);
+  }
   // The upstream CLI shim turns every switch into a permanent --mode override,
   // which prevents later resumes from loading their saved execution state.
   patched = patched.replace(cliModeOverrideBridge, `${bridge}.setMode=async e=>{return await(await ${getApp}()).setMode(e)}`);
@@ -877,6 +887,12 @@ export function patchRuntimeTuiBridge(runtime: string): string {
   }
   if (!/applyFileRewind:[A-Za-z_$][\w$]*\.applyFileRewind/u.test(patched)) {
     optionFields.push(`applyFileRewind:${submitBridge}.applyFileRewind`);
+  }
+  if (!/setCustomSessionTitle:[A-Za-z_$][\w$]*\.setCustomSessionTitle/u.test(patched)) {
+    optionFields.push(`setCustomSessionTitle:${submitBridge}.setCustomSessionTitle`);
+  }
+  if (!/readCustomSessionTitle:[A-Za-z_$][\w$]*\.readCustomSessionTitle/u.test(patched)) {
+    optionFields.push(`readCustomSessionTitle:${submitBridge}.readCustomSessionTitle`);
   }
   if (!/interruptTurn:[A-Za-z_$][\w$]*\.interruptTurn/u.test(patched)) {
     optionFields.push(`interruptTurn:${submitBridge}.interruptTurn`);

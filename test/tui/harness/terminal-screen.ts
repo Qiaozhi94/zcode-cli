@@ -19,6 +19,7 @@ function linesText(lines: string[]): string {
 export class TerminalScreen implements Disposable {
   readonly #terminal: HeadlessTerminal;
   #pendingWrite: Promise<void> = Promise.resolve();
+  #title = "";
 
   constructor(cols: number, rows: number, scrollback = 2_000) {
     this.#terminal = new HeadlessTerminal({
@@ -27,6 +28,7 @@ export class TerminalScreen implements Disposable {
       rows,
       scrollback
     });
+    this.#terminal.onTitleChange((title) => { this.#title = title; });
   }
 
   write(data: string | Uint8Array): Promise<void> {
@@ -39,6 +41,10 @@ export class TerminalScreen implements Disposable {
 
   async settled(): Promise<void> {
     await this.#pendingWrite;
+  }
+
+  title(): string {
+    return this.#title;
   }
 
   screenText(): string {

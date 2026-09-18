@@ -1629,11 +1629,51 @@ async function findFile(directory: string, name: string): Promise<string | null>
   return null;
 }
 
-async function extractWith7Zip(
+/** True when an executable is present on PATH (used to pick an extractor). */
+function commandAvailable(command: string): boolean {
+  return Boolean(Bun.which(command));
+}
+
+async function extractRuntimeArchive(
   archive: string,
   output: string,
   platform: SyncOptions["platform"]
 ): Promise<string> {
+  if (platform === "linux") {
+    // Prefer distro-native readers over 7z so a plain Linux box needs no extra
+    // package: dpkg-deb handles Debian/Ubuntu .deb in one shot, and ar + tar
+    // covers the generic case (tar auto-detects the data.tar.xz payload).
+    const root = join(output, "root");
+    await mkdir(root, { recursive: true });
+    if (commandAvailable("dpkg-deb")) {
+      console.log("Extracting with dpkg-deb");
+      await run("dpkg-deb", ["-x", archive, root]);
+      return root;
+    }
+    if (commandAvailable("ar") && commandAvailable("tar")) {
+      const stage = join(output, "stage-ar");
+      await mkdir(stage, { recursive: true });
+      await run("ar", ["x", resolve(archive)], { cwd: stage });
+      const payload = (await findFile(stage, "data.tar.xz"))
+        ?? (await findFile(stage, "data.tar.zst"))
+        ?? (await findFile(stage, "data.tar.gz"))
+        ?? (await findFile(stage, "data.tar"));
+      if (payload) {
+        console.log("Extracting with ar + tar");
+        if (payload.endsWith(".zst")) {
+          const plain = join(stage, "data.tar");
+          await run("zstd", ["-d", "-f", payload, "-o", plain]);
+          await run("tar", ["xf", plain, "-C", root]);
+        } else {
+          await run("tar", ["xf", payload, "-C", root]);
+        }
+        return root;
+      }
+    }
+  }
+
+  // 7z remains the path for macOS (.zip) and Windows (.7z) payloads, and the
+  // last-resort extractor when no distro-native reader is available.
   const first = join(output, "stage-1");
   await mkdir(first, { recursive: true });
   await run("7z", ["x", archive, `-o${first}`, "-y"]);
@@ -1688,7 +1728,7 @@ async function resolveLockedSource(lock: RuntimeLock, temporaryDirectory: string
       + `If the downloaded installer is trusted, update zcode-runtime.lock.json with the actual sha512 above and re-run.`
     );
   }
-  const extracted = await extractWith7Zip(archive, join(temporaryDirectory, "extract"), lock.platform);
+  const extracted = await extractRuntimeArchive(archive, join(temporaryDirectory, "extract"), lock.platform);
   const runtime = await findFile(extracted, "zcode.cjs");
   if (!runtime || basename(dirname(runtime)) !== "glm") {
     throw new Error("Could not locate resources/glm/zcode.cjs.");

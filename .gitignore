@@ -8,3 +8,6 @@ bin/runtime-config.cjs
 .zcode/
 *.tgz
 .DS_Store
+
+# agent runtime dirs (sessions/logs) — never track
+.omo/
